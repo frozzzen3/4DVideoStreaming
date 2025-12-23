@@ -121,7 +121,6 @@ def compute_D1_D2_psnr(original_mesh, decoded_mesh):
         o3d.utility.Vector3dVector(original_vertices)
     )
     signal_peak = np.linalg.norm(aabb.get_max_bound() - aabb.get_min_bound())
-    signal_peak = np.sqrt(12)
     psnr_d1 = 20 * np.log10(signal_peak) - 10 * np.log10(MSE_D1)
     psnr_d2 = 20 * np.log10(signal_peak) - 10 * np.log10(MSE_D2)
 

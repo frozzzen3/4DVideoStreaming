@@ -17,38 +17,49 @@ import py7zr
 import zipfile
 from metrics import compute_D1_psnr, compute_D2_psnr, compute_D1_D2_psnr
 
-def render_mesh(mesh, width=512, height=512, camera_params=None):
-    """
-    Headless mesh rendering compatible with Open3D 0.19.0.
-    Produces a normal (RGB) and a depth image.
+def flip_uv_v_inplace(mesh: o3d.geometry.TriangleMesh):
+    if not mesh.has_triangle_uvs():
+        return
+    uvs = np.asarray(mesh.triangle_uvs)
+    uvs[:, 1] = 1.0 - uvs[:, 1]
+    mesh.triangle_uvs = o3d.utility.Vector2dVector(uvs)
 
-    Args:
-        mesh (o3d.geometry.TriangleMesh): Input mesh.
-        width (int): Render width.
-        height (int): Render height.
-        camera_params (o3d.camera.PinholeCameraParameters): Optional camera parameters.
-
-    Returns:
-        tuple: (normal_img, depth_img, depth_range)
+def render_mesh(mesh, width=512, height=512, camera_params=None, enable_lighting=False):
     """
-    # Copy mesh to avoid modifying the input
-    mesh_copy = o3d.geometry.TriangleMesh(mesh)
-    if not mesh_copy.has_vertex_normals():
+    Render textured RGB + depth using OffscreenRenderer (Open3D 0.19.x).
+    Returns: (rgb_uint8 HxWx3, depth_uint8 HxW, (dmin, dmax))
+    """
+    mesh_copy = mesh
+
+    if enable_lighting and not mesh_copy.has_vertex_normals():
         mesh_copy.compute_vertex_normals()
 
-    # Convert normals to RGB colors in [0,1]
-    normals = np.asarray(mesh_copy.vertex_normals)
-    mesh_copy.vertex_colors = o3d.utility.Vector3dVector((normals + 1.0) / 2.0)
+    # ---- Make a "held" texture image if present ----
+    tex_img = None
+    if hasattr(mesh_copy, "textures") and len(mesh_copy.textures) > 0:
+        # Convert to numpy and re-wrap -> ensures a held instance owned by Python
+        tex_np = np.asarray(mesh_copy.textures[0])
+        if tex_np is not None and tex_np.size > 0:
+            tex_img = o3d.geometry.Image(np.ascontiguousarray(tex_np))
 
-    # Create offscreen renderer
+    use_texture = (tex_img is not None) and mesh_copy.has_triangle_uvs()
+
     renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
-    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])  # RGBA = white
-    # Unlit material → render vertex colors directly
+    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])
+
     mat = o3d.visualization.rendering.MaterialRecord()
-    mat.shader = "defaultUnlit"
+    mat.shader = "defaultLit" if enable_lighting else "defaultUnlit"
+    mat.base_color = [1.0, 1.0, 1.0, 1.0]
+
+    if use_texture:
+        mat.albedo_img = tex_img
+        if enable_lighting:
+            mat.roughness = 1.0
+            mat.metallic = 0.0
+
     renderer.scene.add_geometry("mesh", mesh_copy, mat)
 
-    # Camera setup
+    # Camera
     if camera_params is not None:
         intrinsic = camera_params.intrinsic.intrinsic_matrix
         extrinsic = camera_params.extrinsic
@@ -56,24 +67,21 @@ def render_mesh(mesh, width=512, height=512, camera_params=None):
     else:
         center = mesh_copy.get_center()
         eye = center + np.array([0, 0, 2.0])
-        up = [0, 1, 0]
-        renderer.scene.camera.look_at(center, eye, up)
+        renderer.scene.camera.look_at(center, eye, [0, 1, 0])
 
-    # ---- Rendering ----
-    normal_img = np.asarray(renderer.render_to_image(), dtype=np.uint8)
-
+    rgb_img = np.asarray(renderer.render_to_image(), dtype=np.uint8)
     depth_f = np.asarray(renderer.render_to_depth_image())
+
     dmin, dmax = float(depth_f.min()), float(depth_f.max())
     if dmax > dmin:
-        depth_img = ((depth_f - dmin) / (dmax - dmin) * 255).astype(np.uint8)
+        depth_img = ((depth_f - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
     else:
         depth_img = np.zeros_like(depth_f, dtype=np.uint8)
 
-    # Clean up (no .release() in 0.19)
     renderer.scene.clear_geometry()
     del renderer
 
-    return normal_img, depth_img, (dmin, dmax)
+    return rgb_img, depth_img, (dmin, dmax)
 
 
 def select_viewpoints(mesh, gt_mesh, num_views=4, width=1080, height=1920):
@@ -196,22 +204,16 @@ def evaluate_meshes(gt_mesh, recon_mesh, viewpoints, output_dir="renderings", wi
         gt_normal, gt_depth, gt_depth_range = render_mesh(gt_mesh, width=width, height=height, camera_params=view)
         recon_normal, recon_depth, recon_depth_range = render_mesh(recon_mesh, width=width, height=height, camera_params=view)
 
-        # Debug: Print image shapes and ranges
-        #print(f"View {i+1} - GT Normal Shape: {gt_normal.shape}, GT Depth Shape: {gt_depth.shape}, GT Depth Range: {gt_depth_range}")
-        #print(f"View {i+1} - Recon Normal Shape: {recon_normal.shape}, Recon Depth Shape: {recon_depth.shape}, Recon Depth Range: {recon_depth_range}")
-        #print(f"View {i+1} - GT Normal Mean (R,G,B): {np.mean(gt_normal, axis=(0,1))}")
-        #print(f"View {i+1} - Recon Normal Mean (R,G,B): {np.mean(recon_normal, axis=(0,1))}")
-
         # Save renderings
-        cv2.imwrite(os.path.join(output_dir, f"gt_view_{i}_normal.png"), cv2.cvtColor(gt_normal, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(os.path.join(output_dir, f"recon_view_{i}_normal.png"), cv2.cvtColor(recon_normal, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(os.path.join(output_dir, f"gt_view_{i}_depth.png"), gt_depth)
-        cv2.imwrite(os.path.join(output_dir, f"recon_view_{i}_depth.png"), recon_depth)
+        cv2.imwrite(os.path.join(output_dir, f"gt_view_{i}_rgb.png"), cv2.cvtColor(gt_normal, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(output_dir, f"recon_view_{i}_rgb.png"), cv2.cvtColor(recon_normal, cv2.COLOR_RGB2BGR))
+        #cv2.imwrite(os.path.join(output_dir, f"gt_view_{i}_depth.png"), gt_depth)
+        #cv2.imwrite(os.path.join(output_dir, f"recon_view_{i}_depth.png"), recon_depth)
 
         # Save debug difference image (normal map)
-        normal_diff = np.abs(gt_normal.astype(float) - recon_normal.astype(float))
-        normal_diff = (normal_diff / normal_diff.max() * 255).astype(np.uint8) if normal_diff.max() > 0 else normal_diff.astype(np.uint8)
-        cv2.imwrite(os.path.join(output_dir, f"view_{i}_normal_diff.png"), cv2.cvtColor(normal_diff, cv2.COLOR_RGB2BGR))
+        #normal_diff = np.abs(gt_normal.astype(float) - recon_normal.astype(float))
+        #normal_diff = (normal_diff / normal_diff.max() * 255).astype(np.uint8) if normal_diff.max() > 0 else normal_diff.astype(np.uint8)
+        #cv2.imwrite(os.path.join(output_dir, f"view_{i}_normal_diff.png"), cv2.cvtColor(normal_diff, cv2.COLOR_RGB2BGR))
 
         # Compute SSIM for depth and normal maps
         score_depth = compute_ssim(gt_depth, recon_depth, multichannel=False)
@@ -239,3 +241,8 @@ def evaluate_meshes(gt_mesh, recon_mesh, viewpoints, output_dir="renderings", wi
     # print(f"Average Normal PSNR: {avg_psnr_normal:.4f}")
 
     return avg_ssim_depth, avg_ssim_normal, avg_psnr_depth, avg_psnr_normal
+
+def compute_bitrate(total_bits, num_frames, fps):
+    duration_sec = num_frames / fps
+    return total_bits / duration_sec / 1000  # kbps
+
