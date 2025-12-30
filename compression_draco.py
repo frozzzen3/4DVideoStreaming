@@ -21,7 +21,7 @@ result = subprocess.run([
     r"/home/frozzzen/Documents/Github_SINRG/TSMC/draco/build/draco_encoder",
     "-i", ground_truth_mesh_path,
     "-o", output_path,
-    "-qp", "7"
+    "-qp", "14"
 ], capture_output=True, text=True)
 print(result.stdout)
 if result.returncode != 0:
@@ -104,6 +104,7 @@ def parse_mtl_textures(mtl_path: str):
 
     return tex_files
 
+'''
 textures = parse_mtl_textures(src_mtl_path)
 print("textures", textures)
 for tex_rel in textures:
@@ -121,6 +122,14 @@ for tex_rel in textures:
             shutil.copy2(fallback, os.path.join(compressed_path, os.path.basename(tex_rel)))
         else:
             print(f"[WARN] Could not find texture referenced in MTL: {tex_rel}")
+'''
+src_tex_path = "/media/frozzzen/DataDrive/ChromeDownloads/Dancer_dataset/compressed/texture/dancer_fr0001.png"
+dst_tex_path = "/media/frozzzen/DataDrive/ChromeDownloads/Dancer_dataset/compressed/dancer_fr0001.png"
+
+if os.path.isfile(src_tex_path):
+    os.makedirs(os.path.dirname(dst_tex_path), exist_ok=True)
+    shutil.copy2(src_tex_path, dst_tex_path)
+
 
 # Re-add mtllib line into decoded OBJ (and remove any existing mtllib to avoid duplicates)
 def ensure_mtllib(obj_path: str, mtl_file_name: str):
